@@ -1,0 +1,198 @@
+name: Build R68S OpenWrt Firmware
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      clean_build:
+        description: '清理并强制重编'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build R68S (RK3568) Firmware
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout LEDE Source
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+          path: lede
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq \
+            build-essential gcc-multilib g++-multilib \
+            file wget curl git unzip bzip2 xz-utils zstd \
+            python3 python3-distutils python3-setuptools \
+            libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gawk gettext \
+            libssl-dev xsltproc rsync \
+            libelf-dev dwarves \
+            flex bison bc time \
+            autoconf automake libtool \
+            cpio kmod patch pkg-config swig
+
+      - name: Apply R68S Configuration
+        run: |
+          mkdir -p artifacts
+          cat > lede/.config << 'CONFIGEOF'
+          CONFIG_TARGET_rockchip=y
+          CONFIG_TARGET_rockchip_armv8=y
+          CONFIG_TARGET_rockchip_armv8_DEVICE_fastrhino_r68s=y
+          CONFIG_TARGET_MULTI_PROFILE=y
+          CONFIG_TARGET_ALL_PROFILES=n
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=n
+
+          # Basic system
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_usbutils=y
+          CONFIG_PACKAGE_pciutils=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+
+          # LuCI Web UI
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_luci-app-argon-config=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
+
+          # Science internet (PassWall + Xray + sing-box)
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_sing-box=y
+
+          # VPN (ZeroTier + WireGuard)
+          CONFIG_PACKAGE_luci-app-zerotier=y
+          CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn=y
+          CONFIG_PACKAGE_luci-app-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_kmod-wireguard=y
+
+          # Network / Stability
+          CONFIG_PACKAGE_luci-app-upnp=y
+          CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
+          CONFIG_PACKAGE_sqm-scripts=y
+          CONFIG_PACKAGE_luci-app-sqm=y
+          CONFIG_PACKAGE_luci-app-ddns=y
+          CONFIG_PACKAGE_luci-i18n-ddns-zh-cn=y
+          CONFIG_PACKAGE_luci-app-statistics=y
+          CONFIG_PACKAGE_luci-i18n-statistics-zh-cn=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_iperf3=y
+
+          # DNS acceleration
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_luci-app-turboacc=y
+
+          # System tools
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-app-filebrowser=y
+          CONFIG_PACKAGE_luci-app-commands=y
+          CONFIG_PACKAGE_luci-app-vlmcsd=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_bash=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_coreutils=y
+
+          # IPv6
+          CONFIG_PACKAGE_ipv6helper=y
+          CONFIG_PACKAGE_ip6tables=y
+          CONFIG_PACKAGE_kmod-ip6tables=y
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+
+          # Optimization
+          CONFIG_PACKAGE_irqbalance=y
+          CONFIG_PACKAGE_ethtool=y
+
+          # Kernel settings (RK3568)
+          CONFIG_KERNEL_BUILD_USER="r68s-builder"
+          CONFIG_KERNEL_BUILD_DOMAIN="build.local"
+          CONFIG_GRUB_IMAGES=n
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+          CONFIG_TARGET_KERNEL_PARTSIZE=32
+          CONFIGEOF
+          cp lede/.config artifacts/r68s-seed.config
+
+      - name: Expand Configuration
+        run: |
+          cd lede
+          make defconfig
+
+      - name: Update & Install Feeds
+        run: |
+          cd lede
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Download Source Packages
+        run: |
+          cd lede
+          make download -j$(nproc) V=s
+
+      - name: Compile Firmware
+        run: |
+          cd lede
+          make -j$(nproc) V=s || make -j1 V=s
+
+      - name: Collect Build Artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts/firmware
+          find lede/bin/targets/rockchip -type f \( -name "*r68s*" -o -name "*.*" \) \
+            -exec cp -v {} artifacts/firmware/ \; 2>/dev/null || true
+          cp lede/.config artifacts/final-config.txt 2>/dev/null || true
+          echo "=== Firmware files ==="
+          ls -lh artifacts/firmware/
+
+      - name: Upload Firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r68s-openwrt-firmware
+          path: artifacts/firmware/
+          retention-days: 30
+
+      - name: Upload Build Config
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r68s-build-config
+          path: |
+            artifacts/r68s-seed.config
+            artifacts/final-config.txt
+          retention-days: 30
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "========================================"
+          echo "  R68S OpenWrt Build Summary"
+          echo "========================================"
+          echo "Target: FastRhino R68S (RK3568)"
+          echo "Source: coolsnowwolf/lede"
+          echo ""
+          echo "Firmware files:"
+          find artifacts/firmware -type f -exec ls -lh {} \;
