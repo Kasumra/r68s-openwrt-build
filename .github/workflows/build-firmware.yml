@@ -3,33 +3,23 @@ name: Build R68S OpenWrt Firmware
 on:
   push:
     branches: [main, master]
-    paths-ignore:
-      - 'README.md'
-      - '.gitignore'
   workflow_dispatch:
-    inputs:
-      clean_build:
-        description: '清理并强制重编'
-        type: boolean
-        default: false
 
 jobs:
   build:
-    name: Build R68S (RK3568) Firmware
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
+    name: Build R68S (RK3568)
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout LEDE Source
+      - name: Checkout LEDE
         uses: actions/checkout@v4
         with:
           repository: coolsnowwolf/lede
           path: lede
 
-      - name: Setup Build Environment
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential gcc-multilib g++-multilib \
             file wget curl git unzip bzip2 xz-utils zstd \
@@ -40,30 +30,38 @@ jobs:
             libelf-dev dwarves \
             flex bison bc time \
             autoconf automake libtool \
-            cpio kmod patch pkg-config swig
+            cpio kmod patch pkg-config swig \
+            rename
 
-      - name: Apply R68S Configuration
+      - name: Update & Install Feeds
+        working-directory: lede
         run: |
-          mkdir -p artifacts
-          cat > lede/.config << 'CONFIGEOF'
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Default Config for R68S
+        working-directory: lede
+        run: |
+          # 先生成默认配置
+          cat > .config << 'EOF'
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
           CONFIG_TARGET_rockchip_armv8_DEVICE_fastrhino_r68s=y
           CONFIG_TARGET_MULTI_PROFILE=y
           CONFIG_TARGET_ALL_PROFILES=n
           CONFIG_TARGET_PER_DEVICE_ROOTFS=n
+          EOF
 
-          # Basic system
-          CONFIG_PACKAGE_block-mount=y
-          CONFIG_PACKAGE_fdisk=y
-          CONFIG_PACKAGE_lsblk=y
-          CONFIG_PACKAGE_usbutils=y
-          CONFIG_PACKAGE_pciutils=y
-          CONFIG_PACKAGE_kmod-usb3=y
-          CONFIG_PACKAGE_kmod-usb-storage=y
-          CONFIG_PACKAGE_kmod-fs-ext4=y
-          CONFIG_PACKAGE_kmod-fs-vfat=y
-          CONFIG_PACKAGE_kmod-fs-exfat=y
+          make defconfig
+
+          # 保存设备target已选好的基础配置
+          cp .config .config.base
+
+      - name: Select Packages
+        working-directory: lede
+        run: |
+          # 基于 base config，用 sed 追加包
+          cat >> .config << 'PKGEOF'
 
           # LuCI Web UI
           CONFIG_PACKAGE_luci=y
@@ -74,23 +72,18 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
 
-          # Science internet (PassWall + Xray + sing-box)
+          # PassWall
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
-          CONFIG_PACKAGE_xray-core=y
-          CONFIG_PACKAGE_sing-box=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_sing-box=y
 
-          # VPN (ZeroTier + WireGuard)
+          # VPN
           CONFIG_PACKAGE_luci-app-zerotier=y
           CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn=y
           CONFIG_PACKAGE_luci-app-wireguard=y
           CONFIG_PACKAGE_wireguard-tools=y
           CONFIG_PACKAGE_kmod-wireguard=y
 
-          # Network / Stability
+          # Network
           CONFIG_PACKAGE_luci-app-upnp=y
           CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
           CONFIG_PACKAGE_sqm-scripts=y
@@ -102,13 +95,12 @@ jobs:
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_iperf3=y
 
-          # DNS acceleration
+          # DNS
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_luci-app-turboacc=y
 
           # System tools
           CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-filebrowser=y
           CONFIG_PACKAGE_luci-app-commands=y
           CONFIG_PACKAGE_luci-app-vlmcsd=y
           CONFIG_PACKAGE_htop=y
@@ -123,76 +115,63 @@ jobs:
           CONFIG_PACKAGE_odhcp6c=y
           CONFIG_PACKAGE_odhcpd-ipv6only=y
 
-          # Optimization
+          # Hardware
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_usbutils=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
           CONFIG_PACKAGE_irqbalance=y
           CONFIG_PACKAGE_ethtool=y
 
-          # Kernel settings (RK3568)
-          CONFIG_KERNEL_BUILD_USER="r68s-builder"
-          CONFIG_KERNEL_BUILD_DOMAIN="build.local"
-          CONFIG_GRUB_IMAGES=n
+          # 大一点的分区
           CONFIG_TARGET_ROOTFS_PARTSIZE=1024
-          CONFIG_TARGET_KERNEL_PARTSIZE=32
-          CONFIGEOF
-          cp lede/.config artifacts/r68s-seed.config
+          PKGEOF
 
-      - name: Expand Configuration
-        run: |
-          cd lede
+          # 展开所有依赖
           make defconfig
 
-      - name: Update & Install Feeds
-        run: |
-          cd lede
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          echo "=== Final config check ==="
+          grep -c "^CONFIG_PACKAGE" .config
+          grep "DEVICE_fastrhino_r68s" .config
 
-      - name: Download Source Packages
-        run: |
-          cd lede
-          make download -j$(nproc) V=s
+      - name: Download Sources
+        working-directory: lede
+        run: make download -j$(nproc) V=s
 
-      - name: Compile Firmware
-        run: |
-          cd lede
-          make -j$(nproc) V=s || make -j1 V=s
+      - name: Compile
+        working-directory: lede
+        run: make -j$(nproc) V=s 2>&1 | tee build.log
 
-      - name: Collect Build Artifacts
+      - name: Show Build Result
         if: always()
+        working-directory: lede
         run: |
-          mkdir -p artifacts/firmware
-          find lede/bin/targets/rockchip -type f \( -name "*r68s*" -o -name "*.*" \) \
-            -exec cp -v {} artifacts/firmware/ \; 2>/dev/null || true
-          cp lede/.config artifacts/final-config.txt 2>/dev/null || true
-          echo "=== Firmware files ==="
-          ls -lh artifacts/firmware/
+          echo "=== Build output ==="
+          find bin/targets/rockchip -type f -ls 2>/dev/null || echo "No rockchip output"
+          find bin -name "*.img*" -ls 2>/dev/null || echo "No .img files found"
+          echo ""
+          echo "=== Last 30 lines of build log ==="
+          tail -30 build.log 2>/dev/null || echo "No build.log"
 
       - name: Upload Firmware
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r68s-openwrt-firmware
-          path: artifacts/firmware/
+          name: r68s-firmware
+          path: lede/bin/targets/rockchip/armv8/
           retention-days: 30
 
       - name: Upload Build Config
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r68s-build-config
+          name: r68s-config
           path: |
-            artifacts/r68s-seed.config
-            artifacts/final-config.txt
+            lede/.config
+            lede/build.log
           retention-days: 30
-
-      - name: Build Summary
-        if: always()
-        run: |
-          echo "========================================"
-          echo "  R68S OpenWrt Build Summary"
-          echo "========================================"
-          echo "Target: FastRhino R68S (RK3568)"
-          echo "Source: coolsnowwolf/lede"
-          echo ""
-          echo "Firmware files:"
-          find artifacts/firmware -type f -exec ls -lh {} \;
