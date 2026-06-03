@@ -5,7 +5,6 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-
 jobs:
   build:
     name: Build R68S (RK3568)
@@ -40,7 +39,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Generate Default Config for R68S
+      - name: Generate Config & Build
         working-directory: lede
         run: |
           # 先生成默认配置
@@ -55,13 +54,6 @@ jobs:
 
           make defconfig
 
-          # 保存设备target已选好的基础配置
-          cp .config .config.base
-
-      - name: Select Packages
-        working-directory: lede
-        run: |
-          # 基于 base config，用 sed 追加包
           cat >> .config << 'PKGEOF'
 
           # LuCI Web UI
@@ -129,24 +121,23 @@ jobs:
           CONFIG_PACKAGE_irqbalance=y
           CONFIG_PACKAGE_ethtool=y
 
-          # 大一点的分区
           CONFIG_TARGET_ROOTFS_PARTSIZE=1024
           PKGEOF
 
-          # 展开所有依赖
           make defconfig
 
-          echo "=== Final config check ==="
-          grep -c "^CONFIG_PACKAGE" .config
+          echo "=== Config summary ==="
+          echo "Packages: $(grep -c '^CONFIG_PACKAGE' .config)"
           grep "DEVICE_fastrhino_r68s" .config
+          grep -E "PACKAGE_luci-app-passwall|PACKAGE_xray|PACKAGE_sing|PACKAGE_hysteria" .config | grep -v "not set" || echo "(xray/sing-box/hysteria auto-selected by passwall deps)"
 
-      - name: Download Sources
-        working-directory: lede
-        run: make download -j$(nproc) V=s
+          echo ""
+          echo "=== Downloading sources ==="
+          make download -j$(nproc) V=s
 
-      - name: Compile
-        working-directory: lede
-        run: make -j$(nproc) V=s 2>&1 | tee build.log
+          echo ""
+          echo "=== Compiling ==="
+          make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: Show Build Result
         if: always()
@@ -176,4 +167,3 @@ jobs:
             lede/.config
             lede/build.log
           retention-days: 30
-
