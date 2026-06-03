@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     name: Build R68S (RK3568)
@@ -176,5 +179,3 @@ jobs:
             lede/build.log
           retention-days: 30
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
