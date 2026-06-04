@@ -31,7 +31,7 @@ jobs:
             flex bison bc time \
             autoconf automake libtool \
             cpio kmod patch pkg-config swig \
-            rename
+            rename meson cmake ninja-build
 
       - name: Update & Install Feeds
         working-directory: lede
@@ -42,7 +42,6 @@ jobs:
       - name: Generate Config & Build
         working-directory: lede
         run: |
-          # 先生成默认配置
           cat > .config << 'EOF'
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
@@ -50,13 +49,29 @@ jobs:
           CONFIG_TARGET_MULTI_PROFILE=y
           CONFIG_TARGET_ALL_PROFILES=n
           CONFIG_TARGET_PER_DEVICE_ROOTFS=n
-          EOF
 
-          make defconfig
+          CONFIG_DEVEL=y
+          CONFIG_BUILD_LOG=y
 
-          cat >> .config << 'PKGEOF'
+          # Use mbedtls as SSL backend (avoids openssl variant build failures)
+          CONFIG_PACKAGE_libustream-mbedtls=y
+          CONFIG_PACKAGE_libmbedtls=y
+          CONFIG_PACKAGE_px5g-mbedtls=y
 
-          # LuCI Web UI
+          # System
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_usbutils=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+          CONFIG_PACKAGE_irqbalance=y
+          CONFIG_PACKAGE_ethtool=y
+
+          # LuCI
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl=y
           CONFIG_PACKAGE_luci-theme-argon=y
@@ -64,6 +79,10 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
+
+          # R68S Network Settings
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_iperf3=y
 
           # PassWall
           CONFIG_PACKAGE_luci-app-passwall=y
@@ -76,7 +95,7 @@ jobs:
           CONFIG_PACKAGE_wireguard-tools=y
           CONFIG_PACKAGE_kmod-wireguard=y
 
-          # Network
+          # Network/Stability
           CONFIG_PACKAGE_luci-app-upnp=y
           CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
           CONFIG_PACKAGE_sqm-scripts=y
@@ -85,8 +104,6 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-ddns-zh-cn=y
           CONFIG_PACKAGE_luci-app-statistics=y
           CONFIG_PACKAGE_luci-i18n-statistics-zh-cn=y
-          CONFIG_PACKAGE_ip-full=y
-          CONFIG_PACKAGE_iperf3=y
 
           # DNS
           CONFIG_PACKAGE_dnsmasq-full=y
@@ -108,47 +125,31 @@ jobs:
           CONFIG_PACKAGE_odhcp6c=y
           CONFIG_PACKAGE_odhcpd-ipv6only=y
 
-          # Hardware
-          CONFIG_PACKAGE_block-mount=y
-          CONFIG_PACKAGE_fdisk=y
-          CONFIG_PACKAGE_lsblk=y
-          CONFIG_PACKAGE_usbutils=y
-          CONFIG_PACKAGE_kmod-usb3=y
-          CONFIG_PACKAGE_kmod-usb-storage=y
-          CONFIG_PACKAGE_kmod-fs-ext4=y
-          CONFIG_PACKAGE_kmod-fs-vfat=y
-          CONFIG_PACKAGE_kmod-fs-exfat=y
-          CONFIG_PACKAGE_irqbalance=y
-          CONFIG_PACKAGE_ethtool=y
-
           CONFIG_TARGET_ROOTFS_PARTSIZE=1024
-          PKGEOF
+          EOF
 
           make defconfig
 
-          echo "=== Config summary ==="
-          echo "Packages: $(grep -c '^CONFIG_PACKAGE' .config)"
-          grep "DEVICE_fastrhino_r68s" .config
-          grep -E "PACKAGE_luci-app-passwall|PACKAGE_xray|PACKAGE_sing|PACKAGE_hysteria" .config | grep -v "not set" || echo "(xray/sing-box/hysteria auto-selected by passwall deps)"
+          echo "=== Config check ==="
+          echo "Total CONFIG_PACKAGE entries: $(grep -c '^CONFIG_PACKAGE' .config)"
+          echo "R68S device: $(grep 'fastrhino_r68s' .config | grep -c '=y')"
+          echo "PassWall: $(grep 'PACKAGE_luci-app-passwall=' .config)"
+          echo "mbedtls: $(grep 'PACKAGE_libmbedtls=' .config)"
+          echo "ustream: $(grep 'PACKAGE_libustream' .config | grep '=y')"
 
           echo ""
-          echo "=== Downloading sources ==="
+          echo "=== Start download + compile ==="
           make download -j$(nproc) V=s
-
-          echo ""
-          echo "=== Compiling ==="
           make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: Show Build Result
         if: always()
         working-directory: lede
         run: |
-          echo "=== Build output ==="
-          find bin/targets/rockchip -type f -ls 2>/dev/null || echo "No rockchip output"
-          find bin -name "*.img*" -ls 2>/dev/null || echo "No .img files found"
-          echo ""
-          echo "=== Last 30 lines of build log ==="
-          tail -30 build.log 2>/dev/null || echo "No build.log"
+          echo "=== Build products ==="
+          find bin/targets/rockchip -type f
+          echo "=== Build log tail ==="
+          tail -30 build.log 2>/dev/null || true
 
       - name: Upload Firmware
         if: always()
@@ -158,7 +159,7 @@ jobs:
           path: lede/bin/targets/rockchip/armv8/
           retention-days: 30
 
-      - name: Upload Build Config
+      - name: Upload Config
         if: always()
         uses: actions/upload-artifact@v4
         with:
